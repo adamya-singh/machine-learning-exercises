@@ -4,3 +4,4 @@ langchain-openai
 unstructured
 "unstructured[md]"
 libmagic
+chromadb

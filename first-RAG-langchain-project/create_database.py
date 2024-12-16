@@ -1,8 +1,9 @@
 from langchain_community.document_loaders import DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
+from dotenv import load_dotenv
 import os
 import shutil
 
@@ -11,12 +12,14 @@ DATA_PATH = "data/current_data"
 
 def main():
     #only runs if the file is run directly, not if called as a module
-    generate_data_store()
+    load_dotenv()
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    generate_data_store(openai_api_key)
 
-def generate_data_store():
+def generate_data_store(openai_api_key):
     documents = load_documents()
     chunks = split_text(documents)
-    save_to_chroma(chunks)
+    save_to_chroma(chunks, openai_api_key)
 
 def load_documents():
     loader = DirectoryLoader(DATA_PATH, glob="*.md")
@@ -41,14 +44,16 @@ def split_text(documents: list[Document]):
 
     return chunks
 
-def save_to_chroma(chunks: list[Document]):
+def save_to_chroma(chunks: list[Document], openai_api_key):
     #remove existing database if present
     if os.path.exists(CHROMA_PATH):
         shutil.rmtree(CHROMA_PATH)
 
     #create a new database from the documents    
     db = Chroma.from_documents(
-        chunks, OpenAIEmbeddings(), persist_directory = CHROMA_PATH
+        chunks,
+        OpenAIEmbeddings(openai_api_key=openai_api_key),
+        persist_directory = CHROMA_PATH
     )
     db.persist()
     print(f"Saved {len(chunks)} chunks to {CHROMA_PATH}.")
