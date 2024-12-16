@@ -38,17 +38,17 @@ load_documents()
 
 def split_text(documents: list[Document]):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size = 1000,
-        chunk_overlap = 500,
+        chunk_size = 100,
+        chunk_overlap = 50,
         length_function = len,
         add_start_index = True,
     )
     chunks = text_splitter.split_documents(documents)
     print(f"Split {len(documents)} documents into {len(chunks)} chunks.")
 
-    document = chunks[5]
-    print(document.page_content)
-    print(document.metadata)
+    #document = chunks[0]
+    #print(document.page_content)
+    #print(document.metadata)
 
     return chunks
 """
