@@ -4,4 +4,9 @@ langchain-openai
 unstructured
 "unstructured[md]"
 libmagic
-chromadb
+//chromadb
+transformers
+torch
+sentence-transformers
+pinecone-client
+langchain-pinecone
