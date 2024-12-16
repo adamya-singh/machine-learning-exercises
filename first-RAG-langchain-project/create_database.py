@@ -1,10 +1,12 @@
 from langchain_community.document_loaders import DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_pinecone import Pinecone
-import pinecone
+#from langchain_openai import OpenAIEmbeddings
+#from langchain_community.vectorstores import Chroma
+from langchain_pinecone import Pinecone as PineconeVectorStore
+#from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+from pinecone import Pinecone as PineconeClent, ServerlessSpec
 from dotenv import load_dotenv
 import os
 import shutil
@@ -66,23 +68,33 @@ def save_to_chroma(chunks: list[Document], openai_api_key):
 """
 
 def save_to_pinecone(chunks: list[Document], openai_api_key, pinecone_api_key):
-    pinecone.init(api_key=pinecone_api_key, environment="us-east-1")
+    #create a pinecone client instance
+    pc = PineconeClent(pinecone_api_key)
     
     #name of the vector database on pinecone website
     index_name = "rutgers-menu-assistant"
 
-    if index_name not in pinecone.list_indexes():
-        pinecone.create_index(name=index_name, dimension=1536, metric="cosine")
+    if index_name not in pc.list_indexes().names():
+        pc.create_index(
+            name=index_name,
+            dimension=1024,
+            metric="cosine",
+            spec=ServerlessSpec(
+                cloud='aws',
+                region='us-east-1'
+            )
+        )
     
-    index = pinecone.Index(index_name)
+    index = pc.Index(index_name)
 
     #embed the documents and save to pinecone
-    embeddings = OpenAIEmbeddings(openai_api_key)
+    #embeddings = OpenAIEmbeddings(api_key=openai_api_key)
+    embeddings = HuggingFaceEmbeddings(model_name="dunzhang/stella_en_1.5B_v5")
 
-    db = Pinecone.from_documents(
+    db = PineconeVectorStore.from_documents(
         chunks,
         embeddings,
-        index_name=index_name
+        index_name=index_name,
     )
 
     print(f"Saved {len(chunks)} chunks to Pinecone index {index_name}.")
