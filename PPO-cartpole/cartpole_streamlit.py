@@ -136,6 +136,7 @@ actions = []
 rewards = []
 next_states = []
 dones = []
+log_probs = [] #log probabilities of actions taken before policy update
 
 obs, _ = env.reset()
 
@@ -165,10 +166,15 @@ try:
             state_tensor = torch.tensor(state, dtype=torch.float32)
             #run forward pass to get action probabilities
             action_probs = policy_net(state_tensor)
+            #get the distribution of action probabilities (needed to calculate log probs)
+            dist = torch.distributions.Categorical(action_probs)
+            #sample action from action probabilities distribution
+            action = dist.sample().item()
+            #calculate log probabilities of action probs (needed for policy loss)
+            log_prob = dist.log_prob(torch.tensor(action)).item()
             #run forward pass to predict future value ("numerical score of how good is your current situation")
             predicted_value = value_net(state_tensor)
-            #sample action from action probabilities
-            action = torch.multinomial(action_probs, num_samples=1).item()
+            
             #step the environment with the chosen action
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
@@ -179,6 +185,7 @@ try:
             rewards.append(reward)
             next_states.append(next_state)
             dones.append(done)
+            log_probs.append(log_prob) #record log_probs for policy loss calculation
 
             # Append latest observation (update dataframes that record state for visualization)
             pos_df.loc[len(pos_df)]  = [step, state[0]]
@@ -225,7 +232,7 @@ try:
         dones_tensor = torch.tensor(dones, dtype=torch.float32)
         #compute TD errors
         td_errors = rewards_tensor + (1 - dones_tensor) * discount_factor * next_values - values
-        #compute advantages using GAE (generalized advantage estimation)
+        #compute ADVANTAGES using GAE (generalized advantage estimation)
         advantages = torch.zeros_like(td_errors) #create advantages tensor same size as td_errors
         advantage = 0
         for t in reversed(range(len(td_errors))): #loop through time steps in reverse order
@@ -245,6 +252,44 @@ try:
         
         #print advantages
         print(f"Episode {episode} advantages: {advantages}")
+
+        #compute POLICY LOSS
+        actions_tensor = torch.tensor(actions, dtype=torch.long)
+        current_action_probs = policy_net(states_tensor)
+        new_policy_prob = current_action_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze()
+        old_policy_prob = torch.exp(torch.tensor(log_probs))
+        ratio = new_policy_prob / old_policy_prob
+
+        epsilon = 0.2   #clipping parameter
+        term1 = ratio * advantages
+        term2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantages
+
+        #take the minimum and average
+        policy_loss = torch.min(term1, term2)
+        policy_loss = -policy_loss.mean()
+        
+        #print policy loss
+        print(f"Episode {episode} policy loss: {policy_loss.item()}")
+
+        #compute VALUE LOSS
+        returns = torch.zeros_like(rewards_tensor) #create tensor to store actual returns
+        return_at_time_step = 0
+        
+        #compute actual (not predicted) future rewards for each time step
+        for time_step in reversed(range(len(rewards_tensor))):
+            if dones_tensor[time_step]:
+                return_at_time_step = rewards_tensor[time_step]
+            else:
+                return_at_time_step = rewards_tensor[time_step] + discount_factor * return_at_time_step
+                returns[time_step] = return_at_time_step
+        
+        #compute current predicted values
+        current_values = value_net(states_tensor).squeeze()
+        #compute value loss (MSE between predicted and actual values)
+        value_loss = F.mse_loss(current_values, returns)
+
+        #print value loss
+        print(f"Episode {episode} value loss: {value_loss.item()}")
 
 finally:
     env.close()
