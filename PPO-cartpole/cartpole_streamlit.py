@@ -34,6 +34,29 @@ class PolicyNetwork(nn.Module):
 
 
 # ────────────────────────────────
+# .  PPO - value function network
+# ────────────────────────────────
+class ValueNetwork(nn.Module):
+    def __init__(self):
+        super(ValueNetwork, self).__init__()
+        #input -> first hidden layer: 4 inputs -> 64 neurons
+        self.fc1 = nn.Linear(4, 64)
+        #first hidden layer -> second hidden layer: 64 -> 64
+        self.fc2 = nn.Linear(64, 64)
+        #second hidden layer -> output predicted future value for given state
+        self.fc3 = nn.Linear(64, 1)
+    
+    def forward(self, x):
+        #Pass through first layer with ReLU
+        x = F.relu(self.fc1(x))
+        #Pass through second layer with ReLU
+        x = F.relu(self.fc2(x))
+        #raw single output (no activation function since they would restrict it)
+        x = self.fc3(x)
+        return x
+
+
+# ────────────────────────────────
 # 0.  Config
 # ────────────────────────────────
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -84,47 +107,78 @@ def make_chart(df, y_field, title):
 # 3.  Gym loop with live updates
 # ────────────────────────────────
 env = gym.make("CartPole-v1", render_mode="rgb_array")
-policy = PolicyNetwork() #initialize PolicyNetwork (state -> NN -> action probabilities)
+policy_net = PolicyNetwork() #initialize PolicyNetwork (state -> NN -> action probabilities)
+value_net = ValueNetwork() #initialize ValueNetwork (state -> NN -> predicted future value)
+num_episodes = 10 #number of policy iterations
+max_steps_per_episode = 200 #max number of steps (actions taken) in between policy iterations
+
+#lists to record trajectory for current episode (reset after each episode)
+states = []
+actions = []
+rewards = []
+next_states = []
+dones = []
+
 obs, _ = env.reset()
 
 try:
-    for step in range(1_000):
-        ##action = env.action_space.sample() #random action
-        #convert state to tensor for PolicyNetwork
-        state = torch.tensor(obs, dtype=torch.float32)
-        #run forward pass to get action probabilities
-        probs = policy(state)
-        #sample action from action probabilities
-        action = torch.multinomial(probs, num_samples=1).item()
-        #step the environment with the chosen action
-        obs, _, done, trunc, _ = env.step(action)
+    for episode in range(num_episodes):
+        #reset environment and trajectory recordings between episodes
+        obs, _= env.reset()
+        pos_df  = pos_df.iloc[0:0]
+        vel_df  = vel_df.iloc[0:0]
+        ang_df  = ang_df.iloc[0:0]
+        angv_df = angv_df.iloc[0:0]
+        
+        done = False
+        step = 0
 
-        # Append latest observation
-        pos_df.loc[len(pos_df)]  = [step, obs[0]]
-        vel_df.loc[len(vel_df)]  = [step, obs[1]]
-        ang_df.loc[len(ang_df)]  = [step, obs[2]]
-        angv_df.loc[len(angv_df)] = [step, obs[3]]
+        while not done and step < max_steps_per_episode:
+            ##action = env.action_space.sample() #random action
+            #take an observation of the environment, call it state
+            state = obs
+            #convert state to tensor for PolicyNetwork
+            state_tensor = torch.tensor(state, dtype=torch.float32)
+            #run forward pass to get action probabilities
+            action_probs = policy_net(state_tensor)
+            #run forward pass to predict future value ("numerical score of how good is your current situation")
+            predicted_value = value_net(state_tensor)
+            #sample action from action probabilities
+            action = torch.multinomial(action_probs, num_samples=1).item()
+            #step the environment with the chosen action
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
 
-        # Update each chart (150 px tall → never spills)
-        pos_ph.altair_chart( make_chart(pos_df,  "pos",       "Cart Position"), use_container_width=True )
-        vel_ph.altair_chart( make_chart(vel_df,  "vel",       "Cart Velocity"), use_container_width=True )
-        ang_ph.altair_chart( make_chart(ang_df,  "angle",     "Pole Angle"),    use_container_width=True )
-        angv_ph.altair_chart( make_chart(angv_df, "ang_vel",  "Pole Angular Velocity"), use_container_width=True )
+            #record trajectory for current episode
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
+            next_states.append(next_state)
+            dones.append(done)
 
-        # Update frame in Quadrant 1
-        frame_ph.image(
-            Image.fromarray(env.render()),
-            caption=f"Step {step} — {'Left' if action==0 else 'Right'}",
-            use_container_width=True,
-        )
+            # Append latest observation (update dataframes that record state for visualization)
+            pos_df.loc[len(pos_df)]  = [step, state[0]]
+            vel_df.loc[len(vel_df)]  = [step, state[1]]
+            ang_df.loc[len(ang_df)]  = [step, state[2]]
+            angv_df.loc[len(angv_df)] = [step, state[3]]
 
-        time.sleep(0.05)
+            # Update each chart (150 px tall → never spills)
+            pos_ph.altair_chart( make_chart(pos_df,  "pos",       "Cart Position"), use_container_width=True )
+            vel_ph.altair_chart( make_chart(vel_df,  "vel",       "Cart Velocity"), use_container_width=True )
+            ang_ph.altair_chart( make_chart(ang_df,  "angle",     "Pole Angle"),    use_container_width=True )
+            angv_ph.altair_chart( make_chart(angv_df, "ang_vel",  "Pole Angular Velocity"), use_container_width=True )
 
-        if done or trunc:                      # new episode → clear data
-            pos_df  = pos_df.iloc[0:0]
-            vel_df  = vel_df.iloc[0:0]
-            ang_df  = ang_df.iloc[0:0]
-            angv_df = angv_df.iloc[0:0]
-            obs, _  = env.reset()
+            # Update frame in Quadrant 1
+            frame_ph.image(
+                Image.fromarray(env.render()),
+                caption=f"Step {step} — {'Left' if action==0 else 'Right'}",
+                use_container_width=True,
+            )
+
+            time.sleep(0.05)
+            obs = next_state
+            step += 1
+
+
 finally:
     env.close()
