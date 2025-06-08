@@ -84,6 +84,16 @@ with st.container():
         ang_ph  = r2c1.empty()
         angv_ph = r2c2.empty()
 
+        # Add training metrics section
+        st.markdown("### Training Metrics")
+        r3c1, r3c2 = st.columns(2)
+        r4c1, r4c2 = st.columns(2)
+
+        action_probs_ph = r3c1.empty()
+        value_pred_ph = r3c2.empty()
+        advantages_ph = r4c1.empty()
+        td_errors_ph = r4c2.empty()
+
 # ────────────────────────────────
 # 2.  DataFrames for streaming
 # ────────────────────────────────
@@ -91,6 +101,12 @@ pos_df  = pd.DataFrame(columns=["step", "pos"])
 vel_df  = pd.DataFrame(columns=["step", "vel"])
 ang_df  = pd.DataFrame(columns=["step", "angle"])
 angv_df = pd.DataFrame(columns=["step", "ang_vel"])
+
+# New DataFrames for training metrics
+action_probs_df = pd.DataFrame(columns=["step", "left_prob", "right_prob"])
+value_pred_df = pd.DataFrame(columns=["step", "value"])
+advantages_df = pd.DataFrame(columns=["step", "advantage"])
+td_errors_df = pd.DataFrame(columns=["step", "td_error"])
 
 def make_chart(df, y_field, title):
     """Return a 150-px-tall Altair line chart for the given DataFrame."""
@@ -132,6 +148,12 @@ try:
         ang_df  = ang_df.iloc[0:0]
         angv_df = angv_df.iloc[0:0]
         
+        # Reset training metric DataFrames
+        action_probs_df = action_probs_df.iloc[0:0]
+        value_pred_df = value_pred_df.iloc[0:0]
+        advantages_df = advantages_df.iloc[0:0]
+        td_errors_df = td_errors_df.iloc[0:0]
+        
         done = False
         step = 0
 
@@ -164,11 +186,23 @@ try:
             ang_df.loc[len(ang_df)]  = [step, state[2]]
             angv_df.loc[len(angv_df)] = [step, state[3]]
 
+            # Update training metric DataFrames
+            action_probs_df.loc[len(action_probs_df)] = [step, action_probs[0].item(), action_probs[1].item()]
+            value_pred_df.loc[len(value_pred_df)] = [step, predicted_value.item()]
+            advantages_df.loc[len(advantages_df)] = [step, 0]  # Will be updated after episode
+            td_errors_df.loc[len(td_errors_df)] = [step, 0]    # Will be updated after episode
+
             # Update each chart (150 px tall → never spills)
             pos_ph.altair_chart( make_chart(pos_df,  "pos",       "Cart Position"), use_container_width=True )
             vel_ph.altair_chart( make_chart(vel_df,  "vel",       "Cart Velocity"), use_container_width=True )
             ang_ph.altair_chart( make_chart(ang_df,  "angle",     "Pole Angle"),    use_container_width=True )
             angv_ph.altair_chart( make_chart(angv_df, "ang_vel",  "Pole Angular Velocity"), use_container_width=True )
+
+            # Update training metric charts
+            action_probs_ph.altair_chart( make_chart(action_probs_df, "left_prob", "Action Probabilities"), use_container_width=True )
+            value_pred_ph.altair_chart( make_chart(value_pred_df, "value", "Value Predictions"), use_container_width=True )
+            advantages_ph.altair_chart( make_chart(advantages_df, "advantage", "Advantages"), use_container_width=True )
+            td_errors_ph.altair_chart( make_chart(td_errors_df, "td_error", "TD Errors"), use_container_width=True )
 
             # Update frame in Quadrant 1
             frame_ph.image(
@@ -203,6 +237,12 @@ try:
         
         #normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Update advantages and TD errors in DataFrames
+        for t in range(len(advantages)):
+            advantages_df.loc[t, "advantage"] = advantages[t].item()
+            td_errors_df.loc[t, "td_error"] = td_errors[t].item()
+        
         #print advantages
         print(f"Episode {episode} advantages: {advantages}")
 
