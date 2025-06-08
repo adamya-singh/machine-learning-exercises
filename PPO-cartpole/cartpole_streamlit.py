@@ -5,6 +5,34 @@ import pandas as pd
 import altair as alt
 import os, time
 
+##For PPO
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ────────────────────────────────
+# .  PPO - policy network
+# ────────────────────────────────
+class PolicyNetwork(nn.Module):
+    def __init__(self):
+        super(PolicyNetwork, self).__init__()
+        #input -> first hidden layer: 4 inputs -> 64 neurons
+        self.fc1 = nn.Linear(4, 64)
+        #first hidden layer -> second hidden layer: 64 -> 64
+        self.fc2 = nn.Linear(64, 64)
+        #second hidden layer -> output action probabilities
+        self.fc3 = nn.Linear(64, 2)
+    
+    def forward(self, x):
+        #Pass through first layer with ReLU
+        x = F.relu(self.fc1(x))
+        #Pass through second layer with ReLU
+        x = F.relu(self.fc2(x))
+        #Output layer with softmax for probabilities
+        x = F.softmax(self.fc3(x), dim= -1)
+        return x
+
+
 # ────────────────────────────────
 # 0.  Config
 # ────────────────────────────────
@@ -56,11 +84,19 @@ def make_chart(df, y_field, title):
 # 3.  Gym loop with live updates
 # ────────────────────────────────
 env = gym.make("CartPole-v1", render_mode="rgb_array")
+policy = PolicyNetwork() #initialize PolicyNetwork (state -> NN -> action probabilities)
 obs, _ = env.reset()
 
 try:
     for step in range(1_000):
-        action = env.action_space.sample()
+        ##action = env.action_space.sample() #random action
+        #convert state to tensor for PolicyNetwork
+        state = torch.tensor(obs, dtype=torch.float32)
+        #run forward pass to get action probabilities
+        probs = policy(state)
+        #sample action from action probabilities
+        action = torch.multinomial(probs, num_samples=1).item()
+        #step the environment with the chosen action
         obs, _, done, trunc, _ = env.step(action)
 
         # Append latest observation
