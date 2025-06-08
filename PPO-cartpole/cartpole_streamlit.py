@@ -111,6 +111,8 @@ policy_net = PolicyNetwork() #initialize PolicyNetwork (state -> NN -> action pr
 value_net = ValueNetwork() #initialize ValueNetwork (state -> NN -> predicted future value)
 num_episodes = 10 #number of policy iterations
 max_steps_per_episode = 200 #max number of steps (actions taken) in between policy iterations
+discount_factor = 0.99 #how much to discount future rewards when calculating advantage for a time step
+lambda_gae = 0.95 #controls the balance between bias and variance for GAE (how far into the future does each advantage calculation look)
 
 #lists to record trajectory for current episode (reset after each episode)
 states = []
@@ -178,7 +180,31 @@ try:
             time.sleep(0.05)
             obs = next_state
             step += 1
-
+        #(convert to tensor) state and next_state lists for advantage calculation
+        states_tensor = torch.tensor(states, dtype=torch.float32)
+        next_states_tensor = torch.tensor(next_states, dtype=torch.float32)
+        #predict value for each state using ValueNetwork
+        values = value_net(states_tensor).squeeze()
+        next_values = value_net(next_states_tensor).squeeze()
+        #(convert to tensor) rewards and dones lists for temporal difference calculation
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+        dones_tensor = torch.tensor(dones, dtype=torch.float32)
+        #compute TD errors
+        td_errors = rewards_tensor + (1 - dones_tensor) * discount_factor * next_values - values
+        #compute advantages using GAE (generalized advantage estimation)
+        advantages = torch.zeros_like(td_errors) #create advantages tensor same size as td_errors
+        advantage = 0
+        for t in reversed(range(len(td_errors))): #loop through time steps in reverse order
+            if dones[t]: #if pole falls or episode ends
+                advantage = td_errors[t] #advantage is just current advantage (no future to account for)
+            else:
+                advantage = td_errors[t] + discount_factor * lambda_gae * advantage
+            advantages[t] = advantage
+        
+        #normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        #print advantages
+        print(f"Episode {episode} advantages: {advantages}")
 
 finally:
     env.close()
