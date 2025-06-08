@@ -88,11 +88,14 @@ with st.container():
         st.markdown("### Training Metrics")
         r3c1, r3c2 = st.columns(2)
         r4c1, r4c2 = st.columns(2)
+        r5c1, r5c2 = st.columns(2)
 
         action_probs_ph = r3c1.empty()
         value_pred_ph = r3c2.empty()
         advantages_ph = r4c1.empty()
         td_errors_ph = r4c2.empty()
+        policy_loss_ph = r5c1.empty()
+        value_loss_ph = r5c2.empty()
 
 # ────────────────────────────────
 # 2.  DataFrames for streaming
@@ -107,15 +110,17 @@ action_probs_df = pd.DataFrame(columns=["step", "left_prob", "right_prob"])
 value_pred_df = pd.DataFrame(columns=["step", "value"])
 advantages_df = pd.DataFrame(columns=["step", "advantage"])
 td_errors_df = pd.DataFrame(columns=["step", "td_error"])
+policy_loss_df = pd.DataFrame(columns=["episode", "loss"])
+value_loss_df = pd.DataFrame(columns=["episode", "loss"])
 
-def make_chart(df, y_field, title):
+def make_chart(df, y_field, title, x_field="step"):
     """Return a 150-px-tall Altair line chart for the given DataFrame."""
-    if df.empty:                                       # Altair needs at least 1 row
-        df = pd.DataFrame({ "step": [0], y_field: [0] })
+    if df.empty:
+        df = pd.DataFrame({ x_field: [0], y_field: [0] })
     return (
         alt.Chart(df)
            .mark_line()
-           .encode(x="step:Q", y=f"{y_field}:Q")
+           .encode(x=f"{x_field}:Q", y=f"{y_field}:Q")
            .properties(height=250, title=title)
     )
 
@@ -154,6 +159,7 @@ try:
         value_pred_df = value_pred_df.iloc[0:0]
         advantages_df = advantages_df.iloc[0:0]
         td_errors_df = td_errors_df.iloc[0:0]
+        # policy_loss_df and value_loss_df are NOT reset here
         
         done = False
         step = 0
@@ -210,6 +216,8 @@ try:
             value_pred_ph.altair_chart( make_chart(value_pred_df, "value", "Value Predictions"), use_container_width=True )
             advantages_ph.altair_chart( make_chart(advantages_df, "advantage", "Advantages"), use_container_width=True )
             td_errors_ph.altair_chart( make_chart(td_errors_df, "td_error", "TD Errors"), use_container_width=True )
+            policy_loss_ph.altair_chart( make_chart(policy_loss_df, "loss", "Policy Loss", x_field="episode"), use_container_width=True )
+            value_loss_ph.altair_chart( make_chart(value_loss_df, "loss", "Value Loss", x_field="episode"), use_container_width=True )
 
             # Update frame in Quadrant 1
             frame_ph.image(
@@ -290,6 +298,10 @@ try:
 
         #print value loss
         print(f"Episode {episode} value loss: {value_loss.item()}")
+
+        # Update policy and value loss DataFrames
+        policy_loss_df.loc[len(policy_loss_df)] = [episode, policy_loss.item()]
+        value_loss_df.loc[len(value_loss_df)] = [episode, value_loss.item()]
 
 finally:
     env.close()
