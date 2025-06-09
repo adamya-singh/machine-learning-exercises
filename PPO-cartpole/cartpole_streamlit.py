@@ -62,7 +62,7 @@ class ValueNetwork(nn.Module):
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 st.set_page_config(layout="wide")
 st.title("CartPole Environment Visualization")
-st.write("Watch CartPole balance itself with random left/right actions.")
+st.write("Watch CartPole learn to balance the pole by moving the cart left/right.")
 
 # ────────────────────────────────
 # 1.  Layout
@@ -76,15 +76,7 @@ with st.container():
 
     # Q2-Q4: placeholders for four charts (2 × 2 grid)
     with charts_col:
-        r1c1, r1c2 = st.columns(2)
-        r2c1, r2c2 = st.columns(2)
-
-        pos_ph  = r1c1.empty()
-        vel_ph  = r1c2.empty()
-        ang_ph  = r2c1.empty()
-        angv_ph = r2c2.empty()
-
-        # Add training metrics section
+        # Training metrics section at the top
         st.markdown("### Training Metrics")
         r3c1, r3c2 = st.columns(2)
         r4c1, r4c2 = st.columns(2)
@@ -96,6 +88,15 @@ with st.container():
         td_errors_ph = r4c2.empty()
         policy_loss_ph = r5c1.empty()
         value_loss_ph = r5c2.empty()
+
+        # State charts at the bottom
+        r1c1, r1c2 = st.columns(2)
+        r2c1, r2c2 = st.columns(2)
+
+        pos_ph  = r1c1.empty()
+        vel_ph  = r1c2.empty()
+        ang_ph  = r2c1.empty()
+        angv_ph = r2c2.empty()
 
 # ────────────────────────────────
 # 2.  DataFrames for streaming
@@ -132,10 +133,13 @@ def make_chart(df, y_field, title, x_field="step"):
 env = gym.make("CartPole-v1", render_mode="rgb_array")
 policy_net = PolicyNetwork() #initialize PolicyNetwork (state -> NN -> action probabilities)
 value_net = ValueNetwork() #initialize ValueNetwork (state -> NN -> predicted future value)
-num_episodes = 10 #number of policy iterations
+num_episodes = 50 #number of policy iterations
 max_steps_per_episode = 200 #max number of steps (actions taken) in between policy iterations
 discount_factor = 0.99 #how much to discount future rewards when calculating advantage for a time step
 lambda_gae = 0.95 #controls the balance between bias and variance for GAE (how far into the future does each advantage calculation look)
+learning_rate = 0.01 #learning rate for unified loss
+policy_optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate) #use Adam optimizer for policy net
+value_optimizer = torch.optim.Adam(value_net.parameters(), lr=learning_rate * 10) #use Adam optimizer for value net
 
 #lists to record trajectory for current episode (reset after each episode)
 states = []
@@ -159,8 +163,14 @@ try:
         # Reset training metric DataFrames (but DO NOT reset advantages_df or td_errors_df)
         action_probs_df = action_probs_df.iloc[0:0]
         value_pred_df = value_pred_df.iloc[0:0]
-        # advantages_df and td_errors_df are NOT reset here
-        # policy_loss_df and value_loss_df are NOT reset here
+        
+        # Clear trajectory lists for the new episode
+        states = []
+        actions = []
+        rewards = []
+        next_states = []
+        dones = []
+        log_probs = []
         
         done = False
         step = 0
@@ -229,7 +239,7 @@ try:
                 use_container_width=True,
             )
 
-            time.sleep(0.05)
+            #time.sleep(0.005)
             obs = next_state
             step += 1
             global_step += 1
@@ -267,7 +277,7 @@ try:
         td_errors_ph.altair_chart( make_chart(td_errors_df, "td_error", "TD Errors"), use_container_width=True )
 
         #print advantages
-        print(f"Episode {episode} advantages: {advantages}")
+        ##print(f"Episode {episode} advantages: {advantages}")
 
         #compute POLICY LOSS
         actions_tensor = torch.tensor(actions, dtype=torch.long)
@@ -286,6 +296,8 @@ try:
         
         #print policy loss
         print(f"Episode {episode} policy loss: {policy_loss.item()}")
+        #update policy loss dataframe
+        policy_loss_df.loc[len(policy_loss_df)] = [episode, policy_loss.item()]
 
         #compute VALUE LOSS
         returns = torch.zeros_like(rewards_tensor) #create tensor to store actual returns
@@ -297,7 +309,7 @@ try:
                 return_at_time_step = rewards_tensor[time_step]
             else:
                 return_at_time_step = rewards_tensor[time_step] + discount_factor * return_at_time_step
-                returns[time_step] = return_at_time_step
+            returns[time_step] = return_at_time_step
         
         #compute current predicted values
         current_values = value_net(states_tensor).squeeze()
@@ -307,9 +319,18 @@ try:
         #print value loss
         print(f"Episode {episode} value loss: {value_loss.item()}")
 
-        # Update policy and value loss DataFrames
-        policy_loss_df.loc[len(policy_loss_df)] = [episode, policy_loss.item()]
+        # Update value loss dataframe
         value_loss_df.loc[len(value_loss_df)] = [episode, value_loss.item()]
+
+        #backwards pass
+        value_loss_weight = 0.5
+        total_loss = policy_loss + value_loss_weight * value_loss
+
+        policy_optimizer.zero_grad()
+        value_optimizer.zero_grad()
+        total_loss.backward()
+        policy_optimizer.step()
+        value_optimizer.step()
 
 finally:
     env.close()
