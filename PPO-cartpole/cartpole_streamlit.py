@@ -109,8 +109,8 @@ angv_df = pd.DataFrame(columns=["step", "ang_vel"])
 # New DataFrames for training metrics
 action_probs_df = pd.DataFrame(columns=["step", "left_prob", "right_prob"])
 value_pred_df = pd.DataFrame(columns=["step", "value"])
-advantages_df = pd.DataFrame(columns=["step", "advantage"])
-td_errors_df = pd.DataFrame(columns=["step", "td_error"])
+advantages_df = pd.DataFrame(columns=["step", "advantage"]).astype({"step": "int64", "advantage": "float64"})
+td_errors_df = pd.DataFrame(columns=["step", "td_error"]).astype({"step": "int64", "td_error": "float64"})
 policy_loss_df = pd.DataFrame(columns=["episode", "loss"])
 value_loss_df = pd.DataFrame(columns=["episode", "loss"])
 
@@ -133,204 +133,275 @@ def make_chart(df, y_field, title, x_field="step"):
 env = gym.make("CartPole-v1", render_mode="rgb_array")
 policy_net = PolicyNetwork() #initialize PolicyNetwork (state -> NN -> action probabilities)
 value_net = ValueNetwork() #initialize ValueNetwork (state -> NN -> predicted future value)
-num_episodes = 50 #number of policy iterations
+num_episodes = 500 #number of policy iterations
 max_steps_per_episode = 200 #max number of steps (actions taken) in between policy iterations
 discount_factor = 0.99 #how much to discount future rewards when calculating advantage for a time step
 lambda_gae = 0.95 #controls the balance between bias and variance for GAE (how far into the future does each advantage calculation look)
-learning_rate = 0.01 #learning rate for unified loss
+learning_rate = 0.0003 #learning rate for unified loss
 policy_optimizer = torch.optim.Adam(policy_net.parameters(), lr=learning_rate) #use Adam optimizer for policy net
-value_optimizer = torch.optim.Adam(value_net.parameters(), lr=learning_rate * 10) #use Adam optimizer for value net
+value_optimizer = torch.optim.Adam(value_net.parameters(), lr=learning_rate) #use Adam optimizer for value net
 
-#lists to record trajectory for current episode (reset after each episode)
-states = []
-actions = []
-rewards = []
-next_states = []
-dones = []
-log_probs = [] #log probabilities of actions taken before policy update
+# PPO-specific parameters
+ppo_epochs = 4  # Number of optimization epochs per batch
+batch_size = 4  # Number of episodes to collect before updating
+clip_epsilon = 0.2  # PPO clipping parameter
+
+# Storage for multiple episodes
+batch_states = []
+batch_actions = []
+batch_rewards = []
+batch_next_states = []
+batch_dones = []
+batch_old_log_probs = []
 
 obs, _ = env.reset()
 
 try:
-    for episode in range(num_episodes):
-        #reset environment and trajectory recordings between episodes
-        obs, _= env.reset()
-        pos_df  = pos_df.iloc[0:0]
-        vel_df  = vel_df.iloc[0:0]
-        ang_df  = ang_df.iloc[0:0]
-        angv_df = angv_df.iloc[0:0]
-        
-        # Reset training metric DataFrames (but DO NOT reset advantages_df or td_errors_df)
-        action_probs_df = action_probs_df.iloc[0:0]
-        value_pred_df = value_pred_df.iloc[0:0]
-        
-        # Clear trajectory lists for the new episode
-        states = []
-        actions = []
-        rewards = []
-        next_states = []
-        dones = []
-        log_probs = []
-        
-        done = False
-        step = 0
-        episode_adv_indices = []  # Track indices for this episode in advantages_df/td_errors_df
-
-        while not done and step < max_steps_per_episode:
-            ##action = env.action_space.sample() #random action
-            #take an observation of the environment, call it state
-            state = obs
-            #convert state to tensor for PolicyNetwork
-            state_tensor = torch.tensor(state, dtype=torch.float32)
-            #run forward pass to get action probabilities
-            action_probs = policy_net(state_tensor)
-            #get the distribution of action probabilities (needed to calculate log probs)
-            dist = torch.distributions.Categorical(action_probs)
-            #sample action from action probabilities distribution
-            action = dist.sample().item()
-            #calculate log probabilities of action probs (needed for policy loss)
-            log_prob = dist.log_prob(torch.tensor(action)).item()
-            #run forward pass to predict future value ("numerical score of how good is your current situation")
-            predicted_value = value_net(state_tensor)
+    episode = 0
+    while episode < num_episodes:
+        # Collect a batch of episodes
+        for batch_episode in range(batch_size):
+            if episode >= num_episodes:
+                break
+                
+            #reset environment and trajectory recordings between episodes
+            obs, _= env.reset()
+            pos_df  = pos_df.iloc[0:0]
+            vel_df  = vel_df.iloc[0:0]
+            ang_df  = ang_df.iloc[0:0]
+            angv_df = angv_df.iloc[0:0]
             
-            #step the environment with the chosen action
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
+            # Reset training metric DataFrames (but DO NOT reset advantages_df or td_errors_df)
+            action_probs_df = action_probs_df.iloc[0:0]
+            value_pred_df = value_pred_df.iloc[0:0]
+            
+            # Current episode trajectory
+            episode_states = []
+            episode_actions = []
+            episode_rewards = []
+            episode_next_states = []
+            episode_dones = []
+            episode_old_log_probs = []
+            
+            done = False
+            step = 0
+            episode_adv_indices = []  # Track indices for this episode in advantages_df/td_errors_df
 
-            #record trajectory for current episode
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            next_states.append(next_state)
-            dones.append(done)
-            log_probs.append(log_prob) #record log_probs for policy loss calculation
+            while not done and step < max_steps_per_episode:
+                #take an observation of the environment, call it state
+                state = obs
+                #convert state to tensor for PolicyNetwork
+                state_tensor = torch.tensor(state, dtype=torch.float32)
+                
+                # Use the current policy network to get action probabilities
+                with torch.no_grad():  # Don't track gradients during data collection
+                    action_probs = policy_net(state_tensor)
+                    #get the distribution of action probabilities (needed to calculate log probs)
+                    dist = torch.distributions.Categorical(action_probs)
+                    #sample action from action probabilities distribution
+                    action = dist.sample().item()
+                    #calculate log probabilities of action probs (needed for policy loss)
+                    old_log_prob = dist.log_prob(torch.tensor(action)).item()
+                
+                #run forward pass to predict future value ("numerical score of how good is your current situation")
+                with torch.no_grad():
+                    predicted_value = value_net(state_tensor)
+                
+                #step the environment with the chosen action
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
 
-            # Append latest observation (update dataframes that record state for visualization)
-            pos_df.loc[len(pos_df)]  = [step, state[0]]
-            vel_df.loc[len(vel_df)]  = [step, state[1]]
-            ang_df.loc[len(ang_df)]  = [step, state[2]]
-            angv_df.loc[len(angv_df)] = [step, state[3]]
+                #record trajectory for current episode
+                episode_states.append(state)
+                episode_actions.append(action)
+                episode_rewards.append(reward)
+                episode_next_states.append(next_state)
+                episode_dones.append(done)
+                episode_old_log_probs.append(old_log_prob) #record OLD log_probs from CURRENT policy
 
-            # Update training metric DataFrames
-            action_probs_df.loc[len(action_probs_df)] = [step, action_probs[0].item(), action_probs[1].item()]
-            value_pred_df.loc[len(value_pred_df)] = [step, predicted_value.item()]
-            advantages_df.loc[len(advantages_df)] = [global_step, 0]  # Will be updated after episode
-            td_errors_df.loc[len(td_errors_df)] = [global_step, 0]    # Will be updated after episode
-            episode_adv_indices.append(len(advantages_df) - 1)
+                # Append latest observation (update dataframes that record state for visualization)
+                pos_df.loc[len(pos_df)]  = [step, state[0]]
+                vel_df.loc[len(vel_df)]  = [step, state[1]]
+                ang_df.loc[len(ang_df)]  = [step, state[2]]
+                angv_df.loc[len(angv_df)] = [step, state[3]]
 
-            # Update each chart (150 px tall → never spills)
-            pos_ph.altair_chart( make_chart(pos_df,  "pos",       "Cart Position"), use_container_width=True )
-            vel_ph.altair_chart( make_chart(vel_df,  "vel",       "Cart Velocity"), use_container_width=True )
-            ang_ph.altair_chart( make_chart(ang_df,  "angle",     "Pole Angle"),    use_container_width=True )
-            angv_ph.altair_chart( make_chart(angv_df, "ang_vel",  "Pole Angular Velocity"), use_container_width=True )
+                # Update training metric DataFrames
+                action_probs_df.loc[len(action_probs_df)] = [step, action_probs[0].item(), action_probs[1].item()]
+                value_pred_df.loc[len(value_pred_df)] = [step, predicted_value.item()]
+                advantages_df.loc[len(advantages_df)] = [global_step, 0]  # Will be updated after episode
+                td_errors_df.loc[len(td_errors_df)] = [global_step, 0]    # Will be updated after episode
+                episode_adv_indices.append(len(advantages_df) - 1)
 
-            # Update training metric charts
-            action_probs_ph.altair_chart( make_chart(action_probs_df, "left_prob", "Action Probabilities"), use_container_width=True )
-            value_pred_ph.altair_chart( make_chart(value_pred_df, "value", "Value Predictions"), use_container_width=True )
+                # Update each chart (150 px tall → never spills)
+                pos_ph.altair_chart( make_chart(pos_df,  "pos",       "Cart Position"), use_container_width=True )
+                vel_ph.altair_chart( make_chart(vel_df,  "vel",       "Cart Velocity"), use_container_width=True )
+                ang_ph.altair_chart( make_chart(ang_df,  "angle",     "Pole Angle"),    use_container_width=True )
+                angv_ph.altair_chart( make_chart(angv_df, "ang_vel",  "Pole Angular Velocity"), use_container_width=True )
+
+                # Update training metric charts
+                action_probs_ph.altair_chart( make_chart(action_probs_df, "left_prob", "Action Probabilities"), use_container_width=True )
+                value_pred_ph.altair_chart( make_chart(value_pred_df, "value", "Value Predictions"), use_container_width=True )
+                advantages_ph.altair_chart( make_chart(advantages_df, "advantage", "Advantages"), use_container_width=True )
+                td_errors_ph.altair_chart( make_chart(td_errors_df, "td_error", "TD Errors"), use_container_width=True )
+                policy_loss_ph.altair_chart( make_chart(policy_loss_df, "loss", "Policy Loss", x_field="episode"), use_container_width=True )
+                value_loss_ph.altair_chart( make_chart(value_loss_df, "loss", "Value Loss", x_field="episode"), use_container_width=True )
+
+                # Update frame in Quadrant 1
+                frame_ph.image(
+                    Image.fromarray(env.render()),
+                    caption=f"Episode {episode}, Step {step} — {'Left' if action==0 else 'Right'}",
+                    use_container_width=True,
+                )
+
+                #time.sleep(0.005)
+                obs = next_state
+                step += 1
+                global_step += 1
+            
+            # Add episode data to batch
+            batch_states.extend(episode_states)
+            batch_actions.extend(episode_actions)
+            batch_rewards.extend(episode_rewards)
+            batch_next_states.extend(episode_next_states)
+            batch_dones.extend(episode_dones)
+            batch_old_log_probs.extend(episode_old_log_probs)
+            
+            # Compute advantages for this episode and update DataFrames
+            states_tensor = torch.tensor(episode_states, dtype=torch.float32)
+            next_states_tensor = torch.tensor(episode_next_states, dtype=torch.float32)
+            
+            with torch.no_grad():
+                values = value_net(states_tensor).squeeze()
+                next_values = value_net(next_states_tensor).squeeze()
+            
+            rewards_tensor = torch.tensor(episode_rewards, dtype=torch.float32)
+            dones_tensor = torch.tensor(episode_dones, dtype=torch.float32)
+            
+            # Compute TD errors
+            td_errors = rewards_tensor + (1 - dones_tensor) * discount_factor * next_values - values
+            
+            # Compute advantages using GAE
+            advantages = torch.zeros_like(td_errors)
+            advantage = 0
+            for t in reversed(range(len(td_errors))):
+                if episode_dones[t]:
+                    advantage = td_errors[t]
+                else:
+                    advantage = td_errors[t] + discount_factor * lambda_gae * advantage
+                advantages[t] = advantage
+            
+            # Update advantages and TD errors in DataFrames
+            for idx, t in zip(episode_adv_indices, range(len(advantages))):
+                advantages_df.loc[idx, "advantage"] = advantages[t].item()
+                td_errors_df.loc[idx, "td_error"] = td_errors[t].item()
+            
+            # Update charts
             advantages_ph.altair_chart( make_chart(advantages_df, "advantage", "Advantages"), use_container_width=True )
             td_errors_ph.altair_chart( make_chart(td_errors_df, "td_error", "TD Errors"), use_container_width=True )
-            policy_loss_ph.altair_chart( make_chart(policy_loss_df, "loss", "Policy Loss", x_field="episode"), use_container_width=True )
-            value_loss_ph.altair_chart( make_chart(value_loss_df, "loss", "Value Loss", x_field="episode"), use_container_width=True )
-
-            # Update frame in Quadrant 1
-            frame_ph.image(
-                Image.fromarray(env.render()),
-                caption=f"Step {step} — {'Left' if action==0 else 'Right'}",
-                use_container_width=True,
-            )
-
-            #time.sleep(0.005)
-            obs = next_state
-            step += 1
-            global_step += 1
-        #(convert to tensor) state and next_state lists for advantage calculation
-        states_tensor = torch.tensor(states, dtype=torch.float32)
-        next_states_tensor = torch.tensor(next_states, dtype=torch.float32)
-        #predict value for each state using ValueNetwork
-        values = value_net(states_tensor).squeeze()
-        next_values = value_net(next_states_tensor).squeeze()
-        #(convert to tensor) rewards and dones lists for temporal difference calculation
-        rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
-        dones_tensor = torch.tensor(dones, dtype=torch.float32)
-        #compute TD errors
-        td_errors = rewards_tensor + (1 - dones_tensor) * discount_factor * next_values - values
-        #compute ADVANTAGES using GAE (generalized advantage estimation)
-        advantages = torch.zeros_like(td_errors) #create advantages tensor same size as td_errors
-        advantage = 0
-        for t in reversed(range(len(td_errors))): #loop through time steps in reverse order
-            if dones[t]: #if pole falls or episode ends
-                advantage = td_errors[t] #advantage is just current advantage (no future to account for)
-            else:
-                advantage = td_errors[t] + discount_factor * lambda_gae * advantage
-            advantages[t] = advantage
+            
+            episode += 1
         
-        #normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        # Update advantages and TD errors in DataFrames (update last N rows for this episode)
-        for idx, t in zip(episode_adv_indices, range(len(advantages))):
-            advantages_df.loc[idx, "advantage"] = advantages[t].item()
-            td_errors_df.loc[idx, "td_error"] = td_errors[t].item()
-        
-        # Update advantages and TD errors charts after filling DataFrames with real values
-        advantages_ph.altair_chart( make_chart(advantages_df, "advantage", "Advantages"), use_container_width=True )
-        td_errors_ph.altair_chart( make_chart(td_errors_df, "td_error", "TD Errors"), use_container_width=True )
-
-        #print advantages
-        ##print(f"Episode {episode} advantages: {advantages}")
-
-        #compute POLICY LOSS
-        actions_tensor = torch.tensor(actions, dtype=torch.long)
-        current_action_probs = policy_net(states_tensor)
-        new_policy_prob = current_action_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze()
-        old_policy_prob = torch.exp(torch.tensor(log_probs))
-        ratio = new_policy_prob / old_policy_prob
-
-        epsilon = 0.2   #clipping parameter
-        term1 = ratio * advantages
-        term2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantages
-
-        #take the minimum and average
-        policy_loss = torch.min(term1, term2)
-        policy_loss = -policy_loss.mean()
-        
-        #print policy loss
-        print(f"Episode {episode} policy loss: {policy_loss.item()}")
-        #update policy loss dataframe
-        policy_loss_df.loc[len(policy_loss_df)] = [episode, policy_loss.item()]
-
-        #compute VALUE LOSS
-        returns = torch.zeros_like(rewards_tensor) #create tensor to store actual returns
-        return_at_time_step = 0
-        
-        #compute actual (not predicted) future rewards for each time step
-        for time_step in reversed(range(len(rewards_tensor))):
-            if dones_tensor[time_step]:
-                return_at_time_step = rewards_tensor[time_step]
-            else:
-                return_at_time_step = rewards_tensor[time_step] + discount_factor * return_at_time_step
-            returns[time_step] = return_at_time_step
-        
-        #compute current predicted values
-        current_values = value_net(states_tensor).squeeze()
-        #compute value loss (MSE between predicted and actual values)
-        value_loss = F.mse_loss(current_values, returns)
-
-        #print value loss
-        print(f"Episode {episode} value loss: {value_loss.item()}")
-
-        # Update value loss dataframe
-        value_loss_df.loc[len(value_loss_df)] = [episode, value_loss.item()]
-
-        #backwards pass
-        value_loss_weight = 0.5
-        total_loss = policy_loss + value_loss_weight * value_loss
-
-        policy_optimizer.zero_grad()
-        value_optimizer.zero_grad()
-        total_loss.backward()
-        policy_optimizer.step()
-        value_optimizer.step()
+        # Now update the policy and value networks using the collected batch
+        if len(batch_states) > 0:
+            # Convert batch data to tensors
+            states_tensor = torch.tensor(batch_states, dtype=torch.float32)
+            actions_tensor = torch.tensor(batch_actions, dtype=torch.long)
+            rewards_tensor = torch.tensor(batch_rewards, dtype=torch.float32)
+            next_states_tensor = torch.tensor(batch_next_states, dtype=torch.float32)
+            dones_tensor = torch.tensor(batch_dones, dtype=torch.float32)
+            old_log_probs_tensor = torch.tensor(batch_old_log_probs, dtype=torch.float32)
+            
+            # Compute values and advantages for the entire batch
+            with torch.no_grad():
+                values = value_net(states_tensor).squeeze()
+                next_values = value_net(next_states_tensor).squeeze()
+            
+            # Compute TD errors
+            td_errors = rewards_tensor + (1 - dones_tensor) * discount_factor * next_values - values
+            
+            # Compute advantages using GAE (recompute for consistency)
+            advantages = torch.zeros_like(td_errors)
+            advantage = 0
+            episode_start = 0
+            
+            for i in range(len(batch_dones)):
+                if i == 0 or batch_dones[i-1]:  # Start of new episode
+                    episode_start = i
+                    advantage = 0
+            
+            # Process advantages in reverse for each episode in the batch
+            i = len(batch_dones) - 1
+            while i >= 0:
+                if batch_dones[i]:
+                    advantage = td_errors[i]
+                else:
+                    advantage = td_errors[i] + discount_factor * lambda_gae * advantage
+                advantages[i] = advantage
+                i -= 1
+            
+            # Normalize advantages
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            
+            # Compute returns for value loss
+            returns = torch.zeros_like(rewards_tensor)
+            return_val = 0
+            for i in reversed(range(len(rewards_tensor))):
+                if batch_dones[i]:
+                    return_val = rewards_tensor[i]
+                else:
+                    return_val = rewards_tensor[i] + discount_factor * return_val
+                returns[i] = return_val
+            
+            # PPO Update for multiple epochs
+            for ppo_epoch in range(ppo_epochs):
+                # Compute current action probabilities and values
+                current_action_probs = policy_net(states_tensor)
+                current_values = value_net(states_tensor).squeeze()
+                
+                # Compute new log probabilities
+                new_dist = torch.distributions.Categorical(current_action_probs)
+                new_log_probs = new_dist.log_prob(actions_tensor)
+                
+                # Compute ratio
+                ratio = torch.exp(new_log_probs - old_log_probs_tensor)
+                
+                # Compute policy loss (PPO clipped loss)
+                term1 = ratio * advantages
+                term2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages
+                policy_loss = -torch.min(term1, term2).mean()
+                
+                # Compute value loss
+                value_loss = F.mse_loss(current_values, returns)
+                
+                # Total loss
+                total_loss = policy_loss + 0.5 * value_loss
+                
+                # Backward pass
+                policy_optimizer.zero_grad()
+                value_optimizer.zero_grad()
+                total_loss.backward()
+                
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(value_net.parameters(), max_norm=0.5)
+                
+                policy_optimizer.step()
+                value_optimizer.step()
+            
+            # Print losses for the current batch
+            print(f"Batch ending at episode {episode-1}: Policy Loss = {policy_loss.item():.6f}, Value Loss = {value_loss.item():.2f}")
+            
+            # Update loss dataframes (use the episode number for x-axis)
+            policy_loss_df.loc[len(policy_loss_df)] = [episode-1, policy_loss.item()]
+            value_loss_df.loc[len(value_loss_df)] = [episode-1, value_loss.item()]
+            
+            # Clear the batch for next iteration
+            batch_states = []
+            batch_actions = []
+            batch_rewards = []
+            batch_next_states = []
+            batch_dones = []
+            batch_old_log_probs = []
 
 finally:
     env.close()
